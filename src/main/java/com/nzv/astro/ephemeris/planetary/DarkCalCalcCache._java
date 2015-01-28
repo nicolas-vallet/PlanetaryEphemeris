@@ -1,0 +1,225 @@
+/*****************************************************************************\
+ * DarkCalCalc
+\*****************************************************************************/
+
+package com.mhuss.AstroLib;
+
+import java.io.*;
+import com.mhuss.Util.Logger;
+
+/**
+ * A class to calculate and store <TT>DarkCal</TT> data, and optionally
+ * cache the data to a file.
+ */
+public class DarkCalCalc {
+  private DarkCalCalc() {}
+
+ /**
+  * Constructor
+  *
+  * @param dci Month, year, and observer location to use
+  * @param ingnoreDst <TT>true</TT> to ignore Daylight time
+  */
+  public DarkCalCalc(DarkCalInput dci, boolean ignoreDst) {
+    calc(dci, ignoreDst);
+  }
+
+ /**
+  * Constructor
+  *
+  * @param dci Month, year, and observer location to use
+  * @param ingnoreDst <TT>true</TT> to ignore Daylight time
+  * @param cDir directory for output file
+  */
+  public DarkCalCalc(DarkCalInput dci, boolean ignoreDst, String cDir)
+         throws ClassNotFoundException, IOException
+  {
+    if (!readData( cDir, dci ))
+      calc(dci, ignoreDst, cDir);
+  }
+
+  DarkCalData dcd;
+
+  private final String DCD_PREFIX = "dcd";
+  private final String DCD_SUFFIX = ".dat";
+
+  //----------------------------------------------------------------------------
+  // build data file name
+  //
+  private String buildFilename( String cDir, DarkCalInput dci ) {
+    String fn = "/foo";
+    String fs = "/"; //ServletU.getFS();
+    if (null != cDir) {
+      String dir = cDir.endsWith( fs )
+          ? cDir.substring(0, cDir.length()-1)
+          : cDir;
+      String mo = ( dci.month < 10 ) ? "0" + dci.month : "" + dci.month;
+      fn = dir + fs + DCD_PREFIX + dci.year + mo + DCD_SUFFIX;
+    }
+    return fn;
+  }
+
+  //----------------------------------------------------------------------------
+  // see if the darkest hours cache file exists, read it if found
+  //
+  private boolean readData(String cDir, DarkCalInput dci)
+          throws ClassNotFoundException, IOException
+  {
+    boolean result = false;
+    String filename = buildFilename( cDir, dci );
+    File fd = new File(filename);
+    if ( !fd.canRead() ) {
+      Logger.logInfo( "Warning: unable to open input file " + filename );
+    }
+    else {
+      ObjectInputStream ois =
+          new ObjectInputStream( new FileInputStream( fd ) );
+      dcd = (DarkCalData)ois.readObject();
+      Logger.logInfo( "Using " + filename );
+      result = true;
+    }
+    return result;
+  }
+  //----------------------------------------------------------------------------
+  // see if the darkest hours cache file exists, read it if found
+  //
+  private void writeData(String cDir, DarkCalInput dci)
+          throws ClassNotFoundException, IOException
+  {
+    String filename = buildFilename( cDir, dci );
+    File fd = new File(filename);
+    fd.createNewFile();
+    if ( !fd.canWrite() ) {
+      Logger.logError( "Error: unable to create output file " + filename );
+    }
+    else {
+      ObjectOutputStream oos =
+          new ObjectOutputStream( new FileOutputStream( fd ) );
+      oos.writeObject(dcd);
+      oos.flush();
+      Logger.logInfo( "Created " + filename );
+    }
+  }
+  //----------------------------------------------------------------------------
+  // figure out the darkest hours for day (i) & put into dark[i]
+  //
+  private void findDark(int i) {
+    if ( i > dcd.DAYS-2 ) {
+      Logger.logError("illegal index");
+      return;
+    }
+
+    double a_ = dcd.astTwi[i].b;
+    double b_ = dcd.astTwi[i+1].a;
+
+    dcd.dark[i] = new TimePair(a_,b_);
+
+    // define day + time vars to deal with 'yesterday' and 'tomorrow'
+    double darkStart = dcd.astTwi[i].b + i;
+    double darkEnd = dcd.astTwi[i+1].a + (i+1);
+
+    double moonRise;
+    if ( dcd.moonRS2[i].a < 0. || dcd.moonRS2[i].b > dcd.moonRS2[i].a) {
+        moonRise = dcd.moonRS2[i+1].a + (i+1);
+        dcd.moonRS2[i].a = dcd.moonRS2[i+1].a;
+    }
+    else
+        moonRise = dcd.moonRS2[i].a + i;
+
+    double moonSet;
+    if ( dcd.moonRS2[i].b < 0. || dcd.moonRS2[i].a > dcd.moonRS2[i].b ) {
+      moonSet = dcd.moonRS2[i+1].b + (i+1);
+      dcd.moonRS2[i].b = dcd.moonRS2[i+1].b;
+    }
+    else
+      moonSet = dcd.moonRS2[i].b + i;
+
+    // check moon rise & set
+    if (moonSet > darkStart && moonSet < darkEnd) {
+      darkStart = moonSet;
+      dcd.dark[i].a = dcd.moonRS2[i].b;
+    }
+    if (moonRise > darkStart && moonRise < darkEnd ) {
+      darkEnd = moonRise;
+      dcd.dark[i].b = dcd.moonRS2[i].a;
+    }
+
+    dcd.noDarkness[i] = (moonRise < darkStart && moonSet > darkEnd );
+  }
+
+  //----------------------------------------------------------------------------
+ /**
+  * Calculate all the data using the given input
+  *
+  * @param dci Month, year, and observer location to use
+  * @param ingnoreDst <TT>true</TT> to ignore Daylight time
+  */
+  void calc(DarkCalInput dci, boolean ignoreDst)
+  {
+    Logger.logInfo( "Calculating for " + dci.month + "/" + dci.year );
+    dcd = new DarkCalData(dci, ignoreDst);
+    // calc. start and end days
+    //
+    dcd.jdStart = DateOps.dmyToDay( 1, dci.month, dci.year );
+    dcd.jdEnd = ( dci.month < 12 ) ?
+        DateOps.dmyToDay( 1, dci.month + 1, dci.year ) :
+        DateOps.dmyToDay( 1, 1, dci.year + 1 );
+
+    int end = (int)(dcd.jdEnd - dcd.jdStart);
+
+    // fill in data for month in question
+    //
+
+    double tzAdj = (double)dci.tz * Astro.DAYS_PER_HOUR;
+    dcd.dstStart = DateOps.dstStart( dci.year );
+    dcd.dstEnd = DateOps.dstEnd( dci.year );
+    PlanetData pd = new PlanetData();
+    ObsInfo loc = new ObsInfo( dci.lat, dci.lon, dci.tz );
+
+    for( int i=0; i<=end+1; i++ ) {
+      long day = dcd.jdStart + i;
+
+      // automatically adjust for DST if enabled
+      // This 'rough' method will be off by one on moon rise/set between
+      //   midnight and 2:00 on "clock change" days. (sun & astTwi never
+      //   occur at these times.)
+      //
+      double dstAdj =
+          ( false == ignoreDst && day>=dcd.dstStart && day<dcd.dstEnd) ?
+          Astro.DAYS_PER_HOUR : 0.;
+
+      dcd.jd[i] = (double)day - (tzAdj + dstAdj) - .5;
+
+      // calculate rise/set times for the sun
+      dcd.sunRS[i] = RiseSet.getTimes( RiseSet.SUN, dcd.jd[i], loc, pd );
+
+      // calculate rise/set times for Astronomical Twilight
+      dcd.astTwi[i] = RiseSet.getTimes( RiseSet.ASTRONOMICAL_TWI, dcd.jd[i], loc, pd );
+
+      // calculate rise/set time for Luna )
+      dcd.moonRS[i] = RiseSet.getTimes( RiseSet.MOON, dcd.jd[i], loc, pd );
+    }
+
+    // clone the moon array
+    for(int j=0; j<dcd.moonRS.length; j++ )
+      dcd.moonRS2[j] = new TimePair( dcd.moonRS[j] );
+
+    // fill in the dark[] array
+    for( int i=0; i<=end; i++ )
+      findDark(i);
+  }
+ /**
+  * Calculate all the data using the given input
+  *
+  * @param dci Month, year, and observer location to use
+  * @param ingnoreDst <TT>true</TT> to ignore Daylight time
+  * @param cDir Directory for output file
+  */
+  void calc(DarkCalInput dci, boolean ignoreDst, String cDir)
+       throws ClassNotFoundException, IOException
+  {
+    calc(dci, ignoreDst);
+    writeData(cDir, dci );
+  }
+};  // end class DarkCalData
+
